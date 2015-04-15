@@ -65,4 +65,8 @@ void Benchmark::postProcessData()
     for (int i = 0; i < grid.size(); ++i) {
         grid[i] = Value(grid_ary[2 * i], grid_ary[2 * i + 1]);
     }
+
+    _mm_free(samples_ary);
+    _mm_free(C_ary);
+    _mm_free(grid_ary);
 }

@@ -131,6 +131,11 @@ void Benchmark::gridKernel(const int support,
 
     assert(gSize > sSize);
 
+    // Stupid OpenMP 3.0 limit:
+    double *samples_ary = this->samples_ary;
+    double *C_ary       = this->C_ary;
+    double *grid_ary    = this->grid_ary;
+
     // => MPI Split Sample [Host]
     // Deterministic: gind <+const>, cind <+const>, dind
     // Each process, alloca sample_perform_size + sSize for output grid.
@@ -143,7 +148,7 @@ void Benchmark::gridKernel(const int support,
 
         // => OMP [MIC], KMP Affinity `balanced' to optmize cache, or `compact' on host
         // Final: cptr <=const>, d <=const>
-        #pragma omp parallel for
+        #pragma omp parallel for shared(samples_ary) shared(C_ary) shared(grid_ary)
         for (int suppv = 0; suppv < sSize; suppv++) {
             //Value* gptr = &grid[gind];
             //const Value* cptr = &C[cind];
@@ -155,7 +160,10 @@ void Benchmark::gridKernel(const int support,
             // => Vectorization [MIC]
             // Instruct to remove dependency.
             #pragma ivdep
+            #pragma prefetch C_ary:1:64
             for (int suppu = 0; suppu < sSize; suppu++) {
+                __assume_aligned(C_ary, 64);
+                __assume_aligned(grid_ary, 64);
                 const double c_real = C_ary[2 * (cind + sSize * suppv + suppu)    ];
                 const double c_imag = C_ary[2 * (cind + sSize * suppv + suppu) + 1];
 
