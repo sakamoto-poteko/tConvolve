@@ -33,8 +33,8 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
-
-#include <mkl_vml.h>
+#include <assert.h>
+#include <mkl.h>
 
 Benchmark::Benchmark()
         : next(1)
@@ -129,6 +129,8 @@ void Benchmark::gridKernel(const int support,
     // Constant: sSize, support, gSize
     const int sSize = 2 * support + 1;
 
+    assert(gSize > sSize);
+
     // => MPI Split Sample [Host]
     // Deterministic: gind <+const>, cind <+const>, dind
     // Each process, alloca sample_perform_size + sSize for output grid.
@@ -139,11 +141,9 @@ void Benchmark::gridKernel(const int support,
         // The Convoluton function point from which we offset
         const int cind = samples[dind].cOffset;
 
-        double non_race_grid_ary[sSize][(sSize + 1) * 2]; // [suppv][(suppu + 1) * 2]
-
         // => OMP [MIC], KMP Affinity `balanced' to optmize cache, or `compact' on host
         // Final: cptr <=const>, d <=const>
-#pragma omp parallel for
+        #pragma omp parallel for
         for (int suppv = 0; suppv < sSize; suppv++) {
             //Value* gptr = &grid[gind];
             //const Value* cptr = &C[cind];
@@ -152,34 +152,22 @@ void Benchmark::gridKernel(const int support,
             const double d_real = samples_ary[2 * dind];
             const double d_imag = samples_ary[2 * dind + 1];
 
-            non_race_grid_ary[suppv][0] = 0.;
-            non_race_grid_ary[suppv][1] = 0.;
             // => Vectorization [MIC]
             // Instruct to remove dependency.
-#pragma ivdep
+            #pragma ivdep
             for (int suppu = 0; suppu < sSize; suppu++) {
-                // Reason for `+ 2': `*(gptr++)', gptr was added first then dereferenced
-                const double c_real = C_ary[2 * (cind + sSize * suppv + suppu + 1)    ];
-                const double c_imag = C_ary[2 * (cind + sSize * suppv + suppu + 1) + 1];
+                const double c_real = C_ary[2 * (cind + sSize * suppv + suppu)    ];
+                const double c_imag = C_ary[2 * (cind + sSize * suppv + suppu) + 1];
 
                 const double calc_greal = d_real * c_real - d_imag * c_imag;
                 const double calc_gimag = d_real * c_imag + d_imag * c_real;
 
-                // FIXME: Possible race condition
-                non_race_grid_ary[suppv][2 * (suppu + 1)    ] = calc_greal;
-                non_race_grid_ary[suppv][2 * (suppu + 1) + 1] = calc_gimag;
-                //grid_ary[2 * (gind + gSize * suppv + suppu + 1)    ] += calc_greal;
-                //grid_ary[2 * (gind + gSize * suppv + suppu + 1) + 1] += calc_gimag;
+                // NOTE: Possible race condition for `grid_ary' when gSize < sSize. Asserted at the beginning of func.
+                grid_ary[2 * (gind + gSize * suppv + suppu)    ] += calc_greal;
+                grid_ary[2 * (gind + gSize * suppv + suppu) + 1] += calc_gimag;
 
                 //*(gptr++) += d * (*(cptr++));
             }
-
-
-            //vec grid_ary[2 * (gind + gSize * suppv)] += vec non_race_grid_ary[suppv];
-            // NOTE: VML functions can perform in-place operations
-#pragma omp critical (reduce_ary)
-            vdAdd(sSize * 2, grid_ary + (2 * (gind + gSize * suppv)), non_race_grid_ary[suppv], grid_ary + (2 * (gind + gSize * suppv)));
-
 
             //gind += gSize;
             // Changed to `gind + gSize * suppv'

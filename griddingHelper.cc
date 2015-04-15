@@ -63,6 +63,6 @@ void Benchmark::prepareData()
 void Benchmark::postProcessData()
 {
     for (int i = 0; i < grid.size(); ++i) {
-        grid[i] = Value(grid_ary[2 * i], grid_ary[2 * i + i]);
+        grid[i] = Value(grid_ary[2 * i], grid_ary[2 * i + 1]);
     }
 }

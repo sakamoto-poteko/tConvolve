@@ -78,8 +78,10 @@ int main(int argc, char *argv[])
 
     Stopwatch sw;
     bmark.prepareData();
+    MPI_Barrier(MPI_COMM_WORLD);
     sw.start();
     bmark.runGrid();
+    MPI_Barrier(MPI_COMM_WORLD);
     double time = sw.stop();
     bmark.postProcessData();
 
