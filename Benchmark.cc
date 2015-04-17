@@ -28,16 +28,20 @@
 #include "Benchmark.h"
 
 // System includes
+#include <unistd.h>
+#include <sys/times.h>
+
 #include <iostream>
 #include <cmath>
 #include <vector>
 #include <algorithm>
 #include <limits>
-#include <assert.h>
-#include <string.h>
+#include <cassert>
+#include <cstring>
+#include <cstdio>
 
 #include <mkl.h>
-
+#include <mpi.h>
 
 #define _MM_HINT_T0     0
 #define _MM_HINT_NT1    1
@@ -146,6 +150,25 @@ void Benchmark::gridKernel(const int support,
     const int avail_mics = mkl_mic_get_device_count();
     const int sampleSize = samples.size();
     const float host_mic_work_division = 0.45;
+    int proc_rank;
+    int world_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &proc_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    const int samples_per_proc = sampleSize / world_size;
+    const int rank0_sample_size = sampleSize % world_size + samples_per_proc;
+    int MPI_start_dind              = proc_rank ? (proc_rank - 1) * samples_per_proc + rank0_sample_size : 0;
+    int MPI_allocated_sample_size   = proc_rank ? samples_per_proc : rank0_sample_size;
+
+#ifdef VERBOSE
+    if (!proc_rank) {
+        printf("\nMPI Report:\n"
+               "\tTotal Processes:%8d\n"
+               "\tTotal Samples:  %8d\n"
+               "\tSamples/Process:%8d\n"
+               "\tRoot Samples:   %8d\n",
+               world_size, sampleSize, samples_per_proc, rank0_sample_size);
+    }
+#endif
 
     assert(gSize > sSize);
 
@@ -169,14 +192,11 @@ void Benchmark::gridKernel(const int support,
         dimags[i] = samples_ary[i * 2 + 1];
     }
 
-    // Prepare for MPI
-    int MPI_start_dind = 0;
-    int MPI_allocated_sample_size = sampleSize;
     int dev_work_loads[avail_mics + 1]; // + 1 for host, this is the start dind for devices
 
     int host_total_samples = MPI_allocated_sample_size * host_mic_work_division;
-    int mic_total_samples = MPI_allocated_sample_size - host_total_samples;
-    int samples_per_mic = mic_total_samples / avail_mics;   // There's a remainder. Add to host
+    const int mic_total_samples = MPI_allocated_sample_size - host_total_samples;
+    const int samples_per_mic = mic_total_samples / avail_mics;   // There's a remainder. Add to host
     host_total_samples += mic_total_samples % avail_mics;
 
     for (int i = 0; i < avail_mics; ++i) {
@@ -221,13 +241,21 @@ void Benchmark::gridKernel(const int support,
         }
     }
 
-    printf("MIC Offload Kernels Started\n"
-           "Total %2d MICs\n"
-           "Host/MIC load division %2.2f%%\n"
-           "%d samples/MIC, %d in total\n"
-           "%d samples for Host\n",
-           avail_mics, host_mic_work_division * 100,
-           samples_per_mic, mic_total_samples, host_total_samples);
+#ifdef VERBOSE
+    struct tms t;
+    clock_t start_t = times(&t);
+    if (!proc_rank) {
+        printf("MIC Offload Kernels Started\n"
+               "Per Node Report:\n"
+               "\tTotal MICs:             %6d\n"
+               "\tHost/MIC Load Division: %2.0f%%\n"
+               "\tTotal Samples for MICs: %6d\n"
+               "\tSamples/MIC:            %6d\n"
+               "\tSamples/Host:           %6d\n",
+               avail_mics, host_mic_work_division * 100,
+               mic_total_samples, samples_per_mic, host_total_samples);
+    }
+#endif
 
     /// Host begins calculation. Parallel with MICs
     offloadKernel(C_ary, dreals, ginds, gSize, dev_work_loads[avail_mics], sSize,
@@ -239,26 +267,41 @@ void Benchmark::gridKernel(const int support,
     for (int imic = 0; imic < avail_mics; ++imic) {
         #pragma offload_wait target(mic:imic) wait(per_mic_out_grid[imic])
 
-        printf("MIC %d kernel finished\n", imic);
-
         #pragma omp critical
         {
             vdAdd(grid.size() * 2, grid_ary, per_mic_out_grid[imic], grid_ary);
         }
-        printf("MIC %d ouput data reduced finished\n", imic);
+    }
+
+    if (!proc_rank) {
+#ifdef VERBOSE
+        printf("Reducing ...\n");
+#endif
+        MPI_Reduce(MPI_IN_PLACE, grid_ary, grid.size() * 2, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+#ifdef VERBOSE
+        clock_t end_t = times(&t);
+        const double elapsed = static_cast<double>(end_t - start_t) / static_cast<double>(sysconf(_SC_CLK_TCK));
+        const double griddings = (double(nSamples * nChan) * double((sSize) * (sSize)));
+        printf("Reduced\n"
+               "Actual Computation Time (w/o tsfr & print call): %4.4fs, "
+               "i.e. %4.4f billions of grid points per second\n",
+               elapsed, griddings / 1000000000. / elapsed);
+#endif
+    } else {
+        MPI_Reduce(grid_ary, grid_ary, grid.size() * 2, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     }
 }
 
-__attribute__((target (mic))) void Benchmark::offloadKernel(const double* __restrict__ C_ary,
-                                                            const double *dreals,
-                                                            const double *ginds,
-                                                            const int gSize,
-                                                            const int start_dind,
-                                                            const int sSize,
-                                                            const int end_dind,
-                                                            double* __restrict__ grid_ary,
-                                                            const double *dimags,
-                                                            const double *cinds)
+__attribute__((target(mic))) void Benchmark::offloadKernel(const double* __restrict__ C_ary,
+                                                           const double *dreals,
+                                                           const double *ginds,
+                                                           const int gSize,
+                                                           const int start_dind,
+                                                           const int sSize,
+                                                           const int end_dind,
+                                                           double* __restrict__ grid_ary,
+                                                           const double *dimags,
+                                                           const double *cinds)
 {
     for (int dind = start_dind; dind < end_dind; ++dind) {
         const double d_real = dreals[dind];
@@ -302,14 +345,11 @@ void Benchmark::initC(const std::vector<double>& freq,
                       int& support, int& overSample,
                       double& wCellSize, std::vector<Value>& C)
 {
-    std::cout << "Initializing W projection convolution function" << std::endl;
     support = static_cast<int>(1.5 * sqrt(std::abs(baseline) * static_cast<double>(cellSize)
                                           * freq[0]) / cellSize);
 
     overSample = 8;
-    std::cout << "Support = " << support << " pixels" << std::endl;
     wCellSize = 2 * baseline * freq[0] / wSize;
-    std::cout << "W cellsize = " << wCellSize << " wavelengths" << std::endl;
 
     // Convolution function. This should be the convolution of the
     // w projection kernel (the Fresnel term) with the convolution
@@ -322,10 +362,6 @@ void Benchmark::initC(const std::vector<double>& freq,
     const int cCenter = (sSize - 1) / 2;
 
     C.resize(sSize*sSize*overSample*overSample*wSize);
-    std::cout << "Size of convolution function = " << sSize*sSize*overSample
-              *overSample*wSize*sizeof(Value) / (1024*1024) << " MB" << std::endl;
-    std::cout << "Shape of convolution function = [" << sSize << ", " << sSize << ", "
-                  << overSample << ", " << overSample << ", " << wSize << "]" << std::endl;
 
     for (int k = 0; k < wSize; k++) {
         double w = double(k - wSize / 2);
@@ -360,6 +396,19 @@ void Benchmark::initC(const std::vector<double>& freq,
 
     for (int i = 0; i < sSize*sSize*overSample*overSample*wSize; i++) {
         C[i] *= Value(wSize * overSample * overSample / sumC);
+    }
+
+    int proc_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &proc_rank);
+    if (!proc_rank) {
+        std::cout << "Initializing W projection convolution function" << std::endl;
+        std::cout << "Support = " << support << " pixels" << std::endl;
+        std::cout << "W cellsize = " << wCellSize << " wavelengths" << std::endl;
+        std::cout << "Size of convolution function = " << sSize*sSize*overSample
+                  *overSample*wSize*sizeof(Value) / (1024*1024) << " MB" << std::endl;
+        std::cout << "Shape of convolution function = [" << sSize << ", " << sSize << ", "
+                  << overSample << ", " << overSample << ", " << wSize << "]" << std::endl;
+
     }
 }
 

@@ -32,6 +32,7 @@
 #include <cstdlib>
 
 #include <mpi.h>
+#include <mkl.h>
 
 
 // Main testing routine
@@ -44,6 +45,12 @@ int main(int argc, char *argv[])
     if (!mpiFlag)
         return 2;   // Init failed
     MPI_Comm_rank(MPI_COMM_WORLD, &mpiRank);
+
+    int mic_num = mkl_mic_get_device_count();
+    for (int i = 0; i < mic_num; ++i) {
+        #pragma offload_transfer target(mic:i)
+    }
+
 
     // Setup the benchmark class
     Benchmark bmark;
