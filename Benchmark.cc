@@ -34,7 +34,20 @@
 #include <algorithm>
 #include <limits>
 #include <assert.h>
+#include <string.h>
+
 #include <mkl.h>
+
+
+#define _MM_HINT_T0     0
+#define _MM_HINT_NT1    1
+#define _MM_HINT_NT2    2
+#define _MM_HINT_NTA    3
+
+#define ALLOC alloc_if(1) free_if(0)
+#define FREE alloc_if(0) free_if(1)
+#define REUSE alloc_if(0) free_if(0)
+#define ALIGN64 __attribute__((aligned(64)))
 
 Benchmark::Benchmark()
         : next(1)
@@ -122,70 +135,158 @@ void Benchmark::runGrid()
 // iu, iv - integer locations of grid points
 // grid - Output grid: shape (gSize, *)
 // gSize - size of one axis of grid
+
 void Benchmark::gridKernel(const int support,
                            const std::vector<Value>& C,
                            std::vector<Value>& grid, const int gSize)
 {
     // Constant: sSize, support, gSize
     const int sSize = 2 * support + 1;
+    const int grid_ary_byte_size = grid.size() * 2 * sizeof(double);
+    const int avail_mics = mkl_mic_get_device_count();
+    const int sampleSize = samples.size();
+    const float host_mic_work_division = 0.45;
 
     assert(gSize > sSize);
 
-    // Stupid OpenMP 3.0 limit:
-    double *samples_ary = this->samples_ary;
-    double *C_ary       = this->C_ary;
-    double *grid_ary    = this->grid_ary;
+    const double * __restrict__ samples_ary = this->samples_ary;
+    const double * __restrict__ C_ary       = this->C_ary;
+    double * __restrict__ grid_ary          = this->grid_ary;
+    double  per_mic_out_grid[avail_mics][grid.size() * 2]   ALIGN64;
 
-    // => MPI Split Sample [Host]
-    // Deterministic: gind <+const>, cind <+const>, dind
-    // Each process, alloca sample_perform_size + sSize for output grid.
-    for (int dind = 0; dind < int(samples.size()); ++dind) {
-        // The actual grid point from which we offset
-        const int gind = samples[dind].iu + gSize * samples[dind].iv - support;
+    __assume_aligned(samples_ary, 64);
+    __assume_aligned(C_ary, 64);
+    __assume_aligned(grid_ary, 64);
 
-        // The Convoluton function point from which we offset
-        const int cind = samples[dind].cOffset;
+    double cinds[sampleSize]    ALIGN64;
+    double ginds[sampleSize]    ALIGN64;
+    double dreals[sampleSize]   ALIGN64;
+    double dimags[sampleSize]   ALIGN64;
+    for (int i = 0; i < sampleSize; ++i) {
+        cinds[i] = samples[i].cOffset;
+        ginds[i] = samples[i].iu + gSize * samples[i].iv - support;
+        dreals[i] = samples_ary[i * 2];
+        dimags[i] = samples_ary[i * 2 + 1];
+    }
 
-        // => OMP [MIC], KMP Affinity `balanced' to optmize cache, or `compact' on host
-        // Final: cptr <=const>, d <=const>
-        #pragma omp parallel for shared(samples_ary) shared(C_ary) shared(grid_ary)
-        for (int suppv = 0; suppv < sSize; suppv++) {
-            //Value* gptr = &grid[gind];
-            //const Value* cptr = &C[cind];
-            //const Value d = samples[dind].data;
+    // Prepare for MPI
+    int MPI_start_dind = 0;
+    int MPI_allocated_sample_size = sampleSize;
+    int dev_work_loads[avail_mics + 1]; // + 1 for host, this is the start dind for devices
 
-            const double d_real = samples_ary[2 * dind];
-            const double d_imag = samples_ary[2 * dind + 1];
+    int host_total_samples = MPI_allocated_sample_size * host_mic_work_division;
+    int mic_total_samples = MPI_allocated_sample_size - host_total_samples;
+    int samples_per_mic = mic_total_samples / avail_mics;   // There's a remainder. Add to host
+    host_total_samples += mic_total_samples % avail_mics;
 
-            // => Vectorization [MIC]
-            // Instruct to remove dependency.
-            #pragma ivdep
-            #pragma prefetch C_ary:1:64
-            for (int suppu = 0; suppu < sSize; suppu++) {
-                __assume_aligned(C_ary, 64);
-                __assume_aligned(grid_ary, 64);
+    for (int i = 0; i < avail_mics; ++i) {
+        dev_work_loads[i] = samples_per_mic * i + MPI_start_dind;
+    }
+    dev_work_loads[avail_mics] = samples_per_mic * avail_mics + MPI_start_dind;
+
+
+
+    /// Host: Schedule work for MICs
+    for (int imic = 0; imic < avail_mics; ++imic) {
+        const int start_dind = dev_work_loads[imic];
+        const int end_dind = dev_work_loads[imic + 1];
+
+        double * __restrict__ my_out_grid_ary = per_mic_out_grid[imic];
+
+        char memset_comp_sgnl;
+        #pragma offload target(mic:imic) in(C_ary:length(C.size() * 2) align(64) ALLOC) \
+                                         in(cinds:length(sampleSize) align(64) ALLOC) \
+                                         in(ginds:length(sampleSize) align(64) ALLOC) \
+                                         in(dreals:length(sampleSize) align(64) ALLOC) \
+                                         in(dimags:length(sampleSize) align(64) ALLOC) \
+                                         nocopy(my_out_grid_ary:length(grid.size() * 2) align(64) ALLOC) \
+                                         out(memset_comp_sgnl) in(grid_ary_byte_size) \
+                                         signal(&memset_comp_sgnl)
+        {
+            memset(my_out_grid_ary, 0, grid_ary_byte_size);
+            memset_comp_sgnl = 0;
+        }
+
+        #pragma offload target(mic:imic) in(sampleSize) in(sSize) in(gSize) \
+                                         in(start_dind) in(end_dind) \
+                                         out(my_out_grid_ary:length(grid.size() * 2) align(64) REUSE) \
+                                         nocopy(cinds:length(sampleSize) align(64) REUSE) \
+                                         nocopy(ginds:length(sampleSize) align(64) REUSE) \
+                                         nocopy(dreals:length(sampleSize) align(64) REUSE) \
+                                         nocopy(dimags:length(sampleSize) align(64) REUSE) \
+                                         nocopy(C_ary:length(C.size() * 2) align(64) REUSE) \
+                                         signal(my_out_grid_ary) wait(&memset_comp_sgnl)
+        {
+            offloadKernel(C_ary, dreals, ginds, gSize, start_dind, sSize, end_dind, my_out_grid_ary, dimags, cinds);
+        }
+    }
+
+    printf("MIC Offload Kernels Started\n"
+           "Total %2d MICs\n"
+           "Host/MIC load division %2.2f%%\n"
+           "%d samples/MIC, %d in total\n"
+           "%d samples for Host\n",
+           avail_mics, host_mic_work_division * 100,
+           samples_per_mic, mic_total_samples, host_total_samples);
+
+    /// Host begins calculation. Parallel with MICs
+    offloadKernel(C_ary, dreals, ginds, gSize, dev_work_loads[avail_mics], sSize,
+                  dev_work_loads[avail_mics] + host_total_samples, grid_ary, dimags, cinds);
+    /// Host completed calculation.
+
+    /// Host waits for MIC completion, then reduce.
+    #pragma omp parallel for schedule(static)
+    for (int imic = 0; imic < avail_mics; ++imic) {
+        #pragma offload_wait target(mic:imic) wait(per_mic_out_grid[imic])
+
+        printf("MIC %d kernel finished\n", imic);
+
+        #pragma omp critical
+        {
+            vdAdd(grid.size() * 2, grid_ary, per_mic_out_grid[imic], grid_ary);
+        }
+        printf("MIC %d ouput data reduced finished\n", imic);
+    }
+}
+
+__attribute__((target (mic))) void Benchmark::offloadKernel(const double* __restrict__ C_ary,
+                                                            const double *dreals,
+                                                            const double *ginds,
+                                                            const int gSize,
+                                                            const int start_dind,
+                                                            const int sSize,
+                                                            const int end_dind,
+                                                            double* __restrict__ grid_ary,
+                                                            const double *dimags,
+                                                            const double *cinds)
+{
+    for (int dind = start_dind; dind < end_dind; ++dind) {
+        const double d_real = dreals[dind];
+        const double d_imag = dimags[dind];
+        const int gind = ginds[dind];
+        const int cind = cinds[dind];
+
+        #pragma omp parallel for simd
+        #pragma ivdep
+        #pragma prefetch C_ary:_MM_HINT_NT1:64
+        #pragma prefetch grid_ary:_MM_HINT_NTA:64
+        #pragma vector nontemporal (grid_ary)
+        for (int i = 0; i < sSize * sSize; ++i) {
+                int suppv = i / sSize;
+                int suppu = i % sSize;
+
                 const double c_real = C_ary[2 * (cind + sSize * suppv + suppu)    ];
                 const double c_imag = C_ary[2 * (cind + sSize * suppv + suppu) + 1];
 
                 const double calc_greal = d_real * c_real - d_imag * c_imag;
                 const double calc_gimag = d_real * c_imag + d_imag * c_real;
 
-                // NOTE: Possible race condition for `grid_ary' when gSize < sSize. Asserted at the beginning of func.
                 grid_ary[2 * (gind + gSize * suppv + suppu)    ] += calc_greal;
                 grid_ary[2 * (gind + gSize * suppv + suppu) + 1] += calc_gimag;
-
-                //*(gptr++) += d * (*(cptr++));
-            }
-
-            //gind += gSize;
-            // Changed to `gind + gSize * suppv'
-            //cind += sSize;
-            // Changed to `cind + sSize * suppv'
-            // : No dependency over parallel for
         }
-        // Reduce overlapped part => end of
     }
 }
+
 
 /////////////////////////////////////////////////////////////////////////////////
 // Initialize W project convolution function

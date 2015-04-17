@@ -1,0 +1,1 @@
+export OFFLOAD_INIT=on_start

@@ -25,7 +25,7 @@
 #
 #
 CXX=mpiicpc
-CXXFLAGS= -qopt-report=5 -qopt-report-phase=vec,openmp,par -O3 -openmp -mkl -xAVX
+CXXFLAGS= -qopt-report=5 -qopt-report-phase=vec,openmp,par -O3 -std=c++11 -openmp -mkl -xAVX
 # icpc defaults to SSE auto-vectorization. Our cluster runs on Xeon E5 SNB, which supports AVX
 
 EXENAME = tConvolve
