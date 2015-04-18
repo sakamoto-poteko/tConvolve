@@ -229,12 +229,12 @@ void Benchmark::gridKernel(const int support,
 
         #pragma offload target(mic:imic) in(sampleSize) in(sSize) in(gSize) \
                                          in(start_dind) in(end_dind) \
-                                         out(my_out_grid_ary:length(grid.size() * 2) align(64) REUSE) \
-                                         nocopy(cinds:length(sampleSize) align(64) REUSE) \
-                                         nocopy(ginds:length(sampleSize) align(64) REUSE) \
-                                         nocopy(dreals:length(sampleSize) align(64) REUSE) \
-                                         nocopy(dimags:length(sampleSize) align(64) REUSE) \
-                                         nocopy(C_ary:length(C.size() * 2) align(64) REUSE) \
+                                         out(my_out_grid_ary:length(grid.size() * 2) align(64) FREE) \
+                                         nocopy(cinds:length(sampleSize) align(64) FREE) \
+                                         nocopy(ginds:length(sampleSize) align(64) FREE) \
+                                         nocopy(dreals:length(sampleSize) align(64) FREE) \
+                                         nocopy(dimags:length(sampleSize) align(64) FREE) \
+                                         nocopy(C_ary:length(C.size() * 2) align(64) FREE) \
                                          signal(my_out_grid_ary) wait(&memset_comp_sgnl)
         {
             offloadKernel(C_ary, dreals, ginds, gSize, start_dind, sSize, end_dind, my_out_grid_ary, dimags, cinds);
