@@ -84,15 +84,15 @@ class Benchmark {
         int baseline; // Maximum baseline in meters
 
         __attribute__((target (mic))) void offloadKernel(const double* __restrict__ C_ary,
-                                                           const double *dreals,
-                                                           const double *ginds,
+                                                           const double * __restrict__ dreals,
+                                                           const double * __restrict__ ginds,
                                                            const int gSize,
                                                            const int start_dind,
                                                            const int sSize,
                                                            const int end_dind,
                                                            double* __restrict__ grid_ary,
-                                                           const double *dimags,
-                                                           const double *cinds);
+                                                           const double * __restrict__ dimags,
+                                                           const double * __restrict__ cinds);
     private:
         std::vector<Value> grid;
         std::vector<double> u;
