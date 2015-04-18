@@ -205,6 +205,7 @@ void Benchmark::gridKernel(const int support,
     dev_work_loads[avail_mics] = samples_per_mic * avail_mics + MPI_start_dind;
 
 
+    char memset_comp_sgnl[avail_mics];
 
     /// Host: Schedule work for MICs
     for (int imic = 0; imic < avail_mics; ++imic) {
@@ -212,19 +213,17 @@ void Benchmark::gridKernel(const int support,
         const int end_dind = dev_work_loads[imic + 1];
 
         double * __restrict__ my_out_grid_ary = per_mic_out_grid[imic];
-
-        char memset_comp_sgnl;
+        char * __restrict my_memset_comp_sgnl = &(memset_comp_sgnl[imic]);
         #pragma offload target(mic:imic) in(C_ary:length(C.size() * 2) align(64) ALLOC) \
                                          in(cinds:length(sampleSize) align(64) ALLOC) \
                                          in(ginds:length(sampleSize) align(64) ALLOC) \
                                          in(dreals:length(sampleSize) align(64) ALLOC) \
                                          in(dimags:length(sampleSize) align(64) ALLOC) \
                                          nocopy(my_out_grid_ary:length(grid.size() * 2) align(64) ALLOC) \
-                                         out(memset_comp_sgnl) in(grid_ary_byte_size) \
-                                         signal(&memset_comp_sgnl)
+                                         in(grid_ary_byte_size) out(my_memset_comp_sgnl:length(1)) \
+                                         signal(my_memset_comp_sgnl)
         {
             memset(my_out_grid_ary, 0, grid_ary_byte_size);
-            memset_comp_sgnl = 0;
         }
 
         #pragma offload target(mic:imic) in(sampleSize) in(sSize) in(gSize) \
@@ -235,7 +234,7 @@ void Benchmark::gridKernel(const int support,
                                          nocopy(dreals:length(sampleSize) align(64) FREE) \
                                          nocopy(dimags:length(sampleSize) align(64) FREE) \
                                          nocopy(C_ary:length(C.size() * 2) align(64) FREE) \
-                                         signal(my_out_grid_ary) wait(&memset_comp_sgnl)
+                                         signal(my_out_grid_ary) wait(my_memset_comp_sgnl)
         {
             offloadKernel(C_ary, dreals, ginds, gSize, start_dind, sSize, end_dind, my_out_grid_ary, dimags, cinds);
         }
