@@ -204,38 +204,24 @@ void Benchmark::gridKernel(const int support,
     }
     dev_work_loads[avail_mics] = samples_per_mic * avail_mics + MPI_start_dind;
 
-
-    char memset_comp_sgnl[avail_mics];
-
     /// Host: Schedule work for MICs
     for (int imic = 0; imic < avail_mics; ++imic) {
         const int start_dind = dev_work_loads[imic];
         const int end_dind = dev_work_loads[imic + 1];
 
         double * __restrict__ my_out_grid_ary = per_mic_out_grid[imic];
-        char * __restrict my_memset_comp_sgnl = &(memset_comp_sgnl[imic]);
-        #pragma offload target(mic:imic) in(C_ary:length(C.size() * 2) align(64) ALLOC) \
-                                         in(cinds:length(sampleSize) align(64) ALLOC) \
-                                         in(ginds:length(sampleSize) align(64) ALLOC) \
-                                         in(dreals:length(sampleSize) align(64) ALLOC) \
-                                         in(dimags:length(sampleSize) align(64) ALLOC) \
-                                         nocopy(my_out_grid_ary:length(grid.size() * 2) align(64) ALLOC) \
-                                         in(grid_ary_byte_size) out(my_memset_comp_sgnl:length(1)) \
-                                         signal(my_memset_comp_sgnl)
+        #pragma offload target(mic:imic) in(C_ary:length(C.size() * 2) align(64)) \
+                                         in(cinds[start_dind:end_dind]  : align(64)) \
+                                         in(ginds[start_dind:end_dind]  : align(64)) \
+                                         in(dreals[start_dind:end_dind] : align(64)) \
+                                         in(dimags[start_dind:end_dind] : align(64)) \
+                                         in(grid_ary_byte_size) in(sampleSize) \
+                                         in(sSize) in(gSize) \
+                                         in(start_dind) in(end_dind) \
+                                         out(my_out_grid_ary:length(grid.size() * 2) align(64)) \
+                                         signal(my_out_grid_ary)
         {
             memset(my_out_grid_ary, 0, grid_ary_byte_size);
-        }
-
-        #pragma offload target(mic:imic) in(sampleSize) in(sSize) in(gSize) \
-                                         in(start_dind) in(end_dind) \
-                                         out(my_out_grid_ary:length(grid.size() * 2) align(64) FREE) \
-                                         nocopy(cinds:length(sampleSize) align(64) FREE) \
-                                         nocopy(ginds:length(sampleSize) align(64) FREE) \
-                                         nocopy(dreals:length(sampleSize) align(64) FREE) \
-                                         nocopy(dimags:length(sampleSize) align(64) FREE) \
-                                         nocopy(C_ary:length(C.size() * 2) align(64) FREE) \
-                                         signal(my_out_grid_ary) wait(my_memset_comp_sgnl)
-        {
             offloadKernel(C_ary, dreals, ginds, gSize, start_dind, sSize, end_dind, my_out_grid_ary, dimags, cinds);
         }
     }
@@ -291,14 +277,14 @@ void Benchmark::gridKernel(const int support,
     }
 }
 
-__attribute__((target(mic))) void Benchmark::offloadKernel(const double* __restrict__ C_ary,
+__attribute__((target(mic))) void Benchmark::offloadKernel(const double * __restrict__ C_ary,
                                                            const double * __restrict__ dreals,
                                                            const double * __restrict__ ginds,
                                                            const int gSize,
                                                            const int start_dind,
                                                            const int sSize,
                                                            const int end_dind,
-                                                           double* __restrict__ grid_ary,
+                                                           double * __restrict__ grid_ary,
                                                            const double * __restrict__ dimags,
                                                            const double * __restrict__ cinds)
 {
